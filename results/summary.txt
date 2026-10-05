@@ -1,0 +1,8 @@
+test                                    width 1     width 2     width 3     width 4     
+../tests/test1_loop.txt                 42 cycles   36 cycles   35 cycles   35 cycles   
+../tests/test2_independent.txt          21 cycles   17 cycles   17 cycles   16 cycles   
+../tests/test3_forwarding.txt           50 cycles   48 cycles   47 cycles   47 cycles   
+../tests/test4_small_structures.txt     48 cycles   46 cycles   46 cycles   46 cycles   
+../tests/test5_branches.txt             69 cycles   72 cycles   70 cycles   69 cycles   
+../tests/test6_class_example.txt        40 cycles   39 cycles   38 cycles   38 cycles   
+ALL TESTS PASSED
