@@ -1,0 +1,732 @@
+--- provided/code/main.py
++++ code/main.py
+@@ -1,9 +1,14 @@
+ # Qing 
+ # 21st May 2017 
+ 
++# usage: python main.py [input file] [issue width]
++#   input file  -- hardware configuration, initial values and instructions (default: test_case.txt)
++#   issue width -- 1 to 4, overrides the 'Issue width = n' line of the input file (default: 1)
++
++import sys
+ from copy import deepcopy
+ from collections import deque, namedtuple
+-from init import read_instruction, build_rs, ld_sd_entry, ld_sd_exe, ld_sd_mem, cdb, ROB_entry, PC
++from init import read_input, build_rs, ld_sd_entry, ld_sd_exe, ld_sd_mem, cdb, ROB_entry, PC
+ from print_status import ps, pss
+ from issue import issue, check_rs_space
+ from exe import exe 
+@@ -11,76 +16,85 @@
+ from wb import wb 
+ from commit import commit
+ '''initialize'''
+-# read instructions into a list 
+-instructions = read_instruction('code.in')
++# read configuration and instructions 
++input_file = sys.argv[1] if len(sys.argv)>1 else 'test_case.txt'
++config = read_input(input_file)
++instructions = config['instructions']
++issue_width = int(sys.argv[2]) if len(sys.argv)>2 else config['issue_width']
++if (issue_width<1)|(issue_width>4):
++    sys.exit('Issue width must be between 1 and 4')
+ '''initialize regs, RAT, memory''' 
+ # integer REG
+ reg_int = []
+ for i in range(32):
+     reg_int.extend([0])
+-reg_int[1] = 12
+-reg_int[2] = 32
++for i in config['reg_int']:
++    if i != 0: # R0 is hardwired to 0
++        reg_int[i] = config['reg_int'][i]
+ rat_int = deepcopy(reg_int)
+ # fp REG
+ reg_fp = []
+ for i in range(32):
+     reg_fp.extend([0])
+-reg_fp[20] = 3.0
++for i in config['reg_fp']:
++    reg_fp[i] = config['reg_fp'][i]
+ rat_fp = deepcopy(reg_fp)
+ # memory 
+ memory = []
+ for i in range(256):
+     memory.extend([0])
+-memory[4] = 3.0
+-memory[8] = 2.0
+-memory[12] = 1.0
+-memory[24] = 6.0
+-memory[28] = 5.0
+-memory[32] = 4.0
++for i in config['memory']:
++    memory[i] = config['memory'][i]
+ '''intialize reservation stations'''
+-# 2 integer adder rs 
+-size_rs_int_adder = 4 
++# integer adder rs 
++size_rs_int_adder = config['size_rs_int_adder']
+ rs_int_adder = build_rs(size_rs_int_adder)
+-# 3 fp adder rs
+-size_rs_fp_adder = 3
++# fp adder rs
++size_rs_fp_adder = config['size_rs_fp_adder']
+ rs_fp_adder = build_rs(size_rs_fp_adder)
+-# 2 fp multiplier rs
+-size_rs_fp_multi = 2
++# fp multiplier rs
++size_rs_fp_multi = config['size_rs_fp_multi']
+ rs_fp_multi = build_rs(size_rs_fp_multi)
+ '''initilize function unit'''
+-# 1 cycle in int adder 
++# cycles in int adder 
+ fu_int_adder = deque()
+-time_fu_int_adder = 1
+-# 3 cycles in fp adder 
++time_fu_int_adder = config['time_int_adder_exe']
++# cycles in fp adder 
+ fu_fp_adder = deque()
+-time_fu_fp_adder = 4
+-# 20 cycles in fp multiplier
++time_fu_fp_adder = config['time_fp_adder_exe']
++# cycles in fp multiplier
+ fu_fp_multi = deque()
+-time_fu_fp_multi = 15
++time_fu_fp_multi = config['time_fp_multi_exe']
+ '''initialize load/store queue'''
+ ld_sd_queue = deque()
+-size_ld_sd_queue = 5 
++size_ld_sd_queue = config['size_rs_ld_sd']
+ ld_sd_exe = ld_sd_exe()
+ ld_sd_exe.busy = 0
+-time_ld_sd_exe = 1
++time_ld_sd_exe = config['time_ld_sd_exe']
+ ld_sd_mem = ld_sd_mem()
+ ld_sd_mem.busy = 0
+-time_ld_sd_mem = 5
++time_ld_sd_mem = config['time_ld_sd_mem']
+ '''initialize ROB'''
+ ROB = deque()
+-size_ROB = 64
++size_ROB = config['size_ROB']
+ '''initialize CDB'''
++# the CDB broadcasts up to issue_width results per cycle
+ results_buffer = deque()
+-cdb = cdb()
+-cdb.valid = 0
++cdb_entry = cdb
++cdb = []
++for i in range(issue_width):
++    cdb.append(cdb_entry())
++    cdb[-1].valid = 0
+ """issue first instruction"""
+ # instruction pointer 
+ PC = PC()
+ PC.PC = 0
+ PC.valid = 1 
+ cycle = 1
++last_cycle = 0
+ 
+ # print title 
++print ('Issue width = '+str(issue_width))
+ item = ''.ljust(30)
+ item += 'ISSUE'.ljust(15)
+ item += 'EXE'.ljust(15)
+@@ -90,7 +104,8 @@
+ print (item)
+ 
+ # main
+-while (len(ROB)>0)|(cycle==1):
++# run until all instructions are committed and the last store has left the memory unit
++while (len(ROB)>0)|(PC.PC<len(instructions))|(ld_sd_mem.busy==1):
+     
+     '''ISSUE stage'''
+     if (PC.PC<len(instructions))&(PC.valid==1):
+@@ -99,7 +114,7 @@
+                 rs_fp_adder, 
+                 rs_fp_multi, 
+                 ld_sd_queue, size_ld_sd_queue, 
+-                rat_int, rat_fp)
++                rat_int, rat_fp, issue_width)
+ 
+     '''EXE stage'''
+     exe(fu_int_adder, time_fu_int_adder, 
+@@ -120,8 +135,34 @@
+         results_buffer) 
+     
+     '''COMMIT stage'''
+-    commit(ROB, reg_int, reg_fp, cycle, instructions)
++    size = len(ROB)
++    commit(ROB, reg_int, reg_fp, cycle, instructions, issue_width)
++    if len(ROB)<size: # commits of this stage happen in cycle+1
++        last_cycle = cycle+1
+     
+     # cycle number 
+     cycle +=1  
+-    
++    if cycle > 100000:
++        sys.exit('Simulation did not finish after 100000 cycles')
++
++# print registers and memory
++print ('')
++print ('Total cycles: '+str(max(last_cycle, cycle-1)))
++print ('')
++print ('REGISTER VALUES')
++for name, reg in [('R', reg_int), ('F', reg_fp)]:
++    for start in range(0, 32, 8):
++        item = ''.ljust(8)
++        for i in range(start, start+8):
++            item += (name+str(i)).ljust(10)
++        print (item)
++        item = 'value:'.ljust(8)
++        for i in range(start, start+8):
++            item += str(reg[i]).ljust(10)
++        print (item)
++print ('')
++print ('NON-ZERO MEMORY VALUES')
++print ('Addresses'.ljust(15)+'Values')
++for address in range(len(memory)):
++    if memory[address] != 0:
++        print (str(address).ljust(15)+str(memory[address]))
+--- provided/code/init.py
++++ code/init.py
+@@ -1,6 +1,7 @@
+ # Qing 
+ # 21st May 2017 
+ 
++import re
+ from collections import namedtuple
+ 
+ '''define data types'''
+@@ -59,6 +60,56 @@
+     with open(codefile) as f:
+             instructions = f.read().splitlines()
+     return instructions
++# function: convert a string into int or float
++def to_number(text):
++    try:
++        return int(text)
++    except ValueError:
++        return float(text)
++# function: normalize an instruction, e.g. 'ld f4, 8(r1)' --> 'Ld F4 8(R1)'
++def normalize_instruction(line):
++    tokens = [t for t in re.split(r'[,\s]+', line.strip()) if t != '']
++    return ' '.join([tokens[0].capitalize()] + [t.upper() for t in tokens[1:]])
++# function: read hardware configuration, initial values and instructions
++def read_input(inputfile):
++    config = {'issue_width': 1, 'size_ROB': 64,
++              'reg_int': {}, 'reg_fp': {}, 'memory': {}, 'instructions': []}
++    units = [('integer adder', 'int_adder'), ('fp adder', 'fp_adder'),
++             ('fp multiplier', 'fp_multi'), ('load/store unit', 'ld_sd')]
++    with open(inputfile) as f:
++        lines = f.read().splitlines()
++    for line in lines:
++        line = line.strip()
++        lower = line.lower()
++        if (line == '') or ('# of' in lower):
++            continue
++        # functional unit rows: # of rs, cycles in EX, [cycles in Mem], # of FUs
++        unit = [name for (prefix, name) in units if lower.startswith(prefix)]
++        if len(unit) > 0:
++            numbers = [int(n) for n in re.findall(r'\d+', line)]
++            config['size_rs_' + unit[0]] = numbers[0]
++            config['time_' + unit[0] + '_exe'] = numbers[1]
++            if unit[0] == 'ld_sd':
++                config['time_ld_sd_mem'] = numbers[2]
++            if numbers[-1] != 1:
++                print('Warning: only 1 FU per type is supported, using 1 for ' + unit[0])
++        elif lower.startswith('rob entries'):
++            config['size_ROB'] = int(line.split('=')[1])
++        elif lower.startswith('issue width'):
++            config['issue_width'] = int(line.split('=')[1])
++        elif '=' in line:
++            # initial values: R1=10, F2=30.1, Mem[4]=1
++            for item in line.split(','):
++                name, value = [x.strip() for x in item.split('=')]
++                if name.lower().startswith('mem'):
++                    config['memory'][int(name[4:-1])] = to_number(value)
++                elif name[0].upper() == 'R':
++                    config['reg_int'][int(name[1:])] = to_number(value)
++                else:
++                    config['reg_fp'][int(name[1:])] = to_number(value)
++        else:
++            config['instructions'].append(normalize_instruction(line))
++    return config
+ # function: build rs
+ def build_rs(num):
+     rs = []
+--- provided/code/issue.py
++++ code/issue.py
+@@ -2,10 +2,12 @@
+ # 21st May 2017
+ 
+ """
++for up to issue_width instructions per cycle, in program order:
+ 1. put 1 instruction in ROB
+ 2. put this instruction in RS/ld_sd_queue
+ 3. update RAT
+ """
++import re
+ from collections import namedtuple, deque
+ from init import ld_sd_entry, ROB_entry
+ 
+@@ -33,7 +35,7 @@
+     # dest_tag
+     if ins.split(' ')[0]=='Sd': # SD
+         ROB[-1].dest_tag = ldsd_tag
+-    elif ins.split(' ')[0]=='Bne': # BNE
++    elif (ins.split(' ')[0]=='Bne')|(ins.split(' ')[0]=='Beq'): # BNE/BEQ
+         ROB[-1].dest_tag = int(ins.split(' ')[-1]) 
+     else: # ALU and LD instructions
+         ROB[-1].dest_tag = ins.split(' ')[1]
+@@ -140,8 +142,9 @@
+         
+     ld_sd_queue[-1].dest_tag = ROB[-1].ROB_tag
+     # immediate and reg value 
+-    ld_sd_queue[-1].immediate = int(ins.split(' ')[-1][:-4])
+-    register = ins.split(' ')[-1][-3:-1] # register name 
++    operand = re.match(r'(-?\d+)\((R\d+)\)', ins.split(' ')[-1])
++    ld_sd_queue[-1].immediate = int(operand.group(1))
++    register = operand.group(2) # register name 
+     if (type(rat_int[int(register[1:])]) == str):
+         ld_sd_queue[-1].reg_tag = rat_int[int(register[1:])]
+         ld_sd_queue[-1].valid = 0
+@@ -162,18 +165,21 @@
+ def update_rat(ROB, rat_int, rat_fp):
+     if ROB[-1].dest_tag[0] == 'F':
+         rat_fp[int(ROB[-1].dest_tag[1:])] = ROB[-1].ROB_tag
++    elif ROB[-1].dest_tag == 'R0': # R0 is hardwired to 0, never renamed
++        pass
+     elif ROB[-1].dest_tag[0] == 'R':
+         rat_int[int(ROB[-1].dest_tag[1:])] = ROB[-1].ROB_tag
+     else:
+         pass
+ 
+-""""""
+-def issue(cycle, PC, instructions, ROB, size_ROB, 
++# function: issue 1 instruction, return True if it was issued
++def issue_one(cycle, PC, instructions, ROB, size_ROB, 
+         rs_int_adder, 
+         rs_fp_adder, 
+         rs_fp_multi, 
+         ld_sd_queue, size_ld_sd_queue, 
+         rat_int, rat_fp):
++    issued = False
+     # fetch 1 instruction 
+     ins = instructions[PC.PC]
+     op = ins.split(' ')[0] 
+@@ -192,6 +198,7 @@
+             update_rat(ROB, rat_int, rat_fp)
+             # PC
+             PC.PC +=1
++            issued = True
+     # integer adder instructions
+     elif (op=='Add')|(op=='Addi')|(op=='Sub'):
+         # check space
+@@ -205,6 +212,7 @@
+             update_rat(ROB, rat_int, rat_fp)
+             # PC
+             PC.PC +=1
++            issued = True
+     # fp adder instructions
+     elif (op=='Add.d')|(op=='Sub.d'):
+         # check space
+@@ -218,6 +226,7 @@
+             update_rat(ROB, rat_int, rat_fp)
+             # PC
+             PC.PC +=1
++            issued = True
+     # fp multiplier instructions
+     elif (op=='Mult.d'): 
+         # check space
+@@ -231,8 +240,9 @@
+             update_rat(ROB, rat_int, rat_fp)
+             # PC
+             PC.PC +=1
+-    # Bne 
+-    elif (op=='Bne'):
++            issued = True
++    # Bne/Beq: no branch prediction, fetch stalls until the branch is resolved 
++    elif (op=='Bne')|(op=='Beq'):
+         # check space
+         if (len(ROB)<size_ROB)&(check_rs_space(rs_int_adder)>=0):
+             # put ins into ROB
+@@ -242,6 +252,28 @@
+             put_bne_into_rs(rs_int_adder, index, ins, rat_int, rat_fp, ROB)
+             # PC
+             PC.valid = 0
++            issued = True
+     else:
+         pass
++    return issued
+ 
++
++# function: issue up to issue_width instructions in program order
++def issue(cycle, PC, instructions, ROB, size_ROB, 
++        rs_int_adder, 
++        rs_fp_adder, 
++        rs_fp_multi, 
++        ld_sd_queue, size_ld_sd_queue, 
++        rat_int, rat_fp, issue_width):
++    for _ in range(issue_width):
++        # nothing left to fetch, or fetch is stalled by an unresolved branch
++        if (PC.PC>=len(instructions))|(PC.valid==0):
++            break
++        # in-order issue: stop at the first instruction that has no ROB/RS space
++        if not issue_one(cycle, PC, instructions, ROB, size_ROB, 
++                rs_int_adder, 
++                rs_fp_adder, 
++                rs_fp_multi, 
++                ld_sd_queue, size_ld_sd_queue, 
++                rat_int, rat_fp):
++            break
+--- provided/code/exe.py
++++ code/exe.py
+@@ -11,24 +11,36 @@
+ '''
+ from init import fu_entry, fu_result
+ 
++# function: find ROB entry by tag
++def find_ROB_entry(ROB, tag):
++    for index in range(len(ROB)):
++        if ROB[index].ROB_tag == tag:
++            break
++    return index
++
+ # function: check rs and return valid instruction index
+-def check_valid_ins_in_rs(rs):
++# only instructions issued in a previous cycle can start execution; 
++# the oldest one (first in ROB) is selected
++def check_valid_ins_in_rs(rs, ROB, cycle):
+     index = -1
+-    if len(rs)!=0:
+-        for i in range(len(rs)):
+-            if (rs[i].valid_1st==1)&(rs[i].valid_2nd==1)&(rs[i].busy==1):
++    oldest = len(ROB)
++    for i in range(len(rs)):
++        if (rs[i].valid_1st==1)&(rs[i].valid_2nd==1)&(rs[i].busy==1):
++            rob_index = find_ROB_entry(ROB, rs[i].dest_tag)
++            if (ROB[rob_index].issue[0]<cycle)&(rob_index<oldest):
+                 index = i
+-                break
++                oldest = rob_index
+     return index
+ 
+ # function: check ld_sd_queue and return valid instruction index
+-def check_valid_ins_in_ldsd(ldsd):
++def check_valid_ins_in_ldsd(ldsd, ROB, cycle):
+     index = -1
+     if len(ldsd)!=0:
+         for i in range(len(ldsd)):
+             if (ldsd[i].valid==1) & (ldsd[i].ready==0):
+-                index = i
+-                break
++                if ROB[find_ROB_entry(ROB, ldsd[i].dest_tag)].issue[0] < cycle:
++                    index = i
++                    break
+     return index
+ 
+ # function: add entry into fu 
+@@ -39,18 +51,16 @@
+     fu[-1].value2 = ins_in_rs.value_2nd
+     fu[-1].dest_tag = ins_in_rs.dest_tag
+ 
+-# function: find ROB entry by tag
+-def find_ROB_entry(ROB, tag):
+-    for index in range(len(ROB)):
+-        if ROB[index].ROB_tag == tag:
+-            break
+-    return index
+-
+ # function: functional units execution 
+-def fu_exe(fu, fu_results, ROB, time_fu, cycle, PC):
++# new_only: only the entry just fetched from rs advances (the others
++# already advanced in this cycle)
++def fu_exe(fu, fu_results, ROB, time_fu, cycle, PC, new_only=False):
+     if len(fu)!=0:
+-        for element in fu:
+-            element.cycle += 1
++        if new_only:
++            fu[-1].cycle += 1
++        else:
++            for element in fu:
++                element.cycle += 1
+         # write starting cycle 
+         if fu[-1].cycle == 1:
+             index = find_ROB_entry(ROB, fu[-1].dest_tag)
+@@ -68,9 +78,9 @@
+                 fu_results[-1].value = fu[0].value1 - fu[0].value2
+             elif (fu[0].op=='Mult.d'):
+                 fu_results[-1].value = fu[0].value1 * fu[0].value2
+-            elif (fu[0].op=='Bne'):
++            elif (fu[0].op=='Bne')|(fu[0].op=='Beq'):
+                 fu_results.pop()
+-                if fu[0].value1 == fu[0].value2:
++                if (fu[0].value1 == fu[0].value2) != (fu[0].op=='Beq'): # not taken
+                     PC.PC += 1
+                     PC.valid = 1
+                 else:
+@@ -93,8 +103,8 @@
+                     break
+             index = find_ROB_entry(ROB, element.dest_tag)
+             ROB[index].exe.append(cycle)
+-            # execute 
+-            ld_sd_exe.cycle += 1
++        # execute 
++        ld_sd_exe.cycle += 1
+         # write address back to ld_sd_queue
+         if ld_sd_exe.cycle == time_ld_sd_exe:
+             address = ld_sd_exe.value1 + ld_sd_exe.value2
+@@ -124,7 +134,7 @@
+     '''fetch instructions from rs and ld_sd_queue'''
+     # from ld_sd_queue
+     # check valid ins in ld_sd_queue 
+-    index = check_valid_ins_in_ldsd(ld_sd_queue)
++    index = check_valid_ins_in_ldsd(ld_sd_queue, ROB, cycle)
+     # put ins into ld_sd_exe
+     if (index>=0)&(ld_sd_exe.busy==0):
+         ld_sd_exe.busy = 1
+@@ -132,36 +142,29 @@
+         ld_sd_exe.value1 = ld_sd_queue[index].reg_value
+         ld_sd_exe.value2 = ld_sd_queue[index].immediate
+         ld_sd_exe.dest_tag = ld_sd_queue[index].ld_sd_tag
+-        if ROB[find_ROB_entry(ROB, ld_sd_queue[index].dest_tag)].issue[0] < cycle:
+-            ld_sd_execution(ld_sd_exe, time_ld_sd_exe, ld_sd_queue, ROB, cycle)
++        ld_sd_execution(ld_sd_exe, time_ld_sd_exe, ld_sd_queue, ROB, cycle)
+     # from rs 
+-    # int_adder
+-    # fetch valid instruction 
+-    if check_valid_ins_in_rs(rs_int_adder)>=0:
+-        index = check_valid_ins_in_rs(rs_int_adder)
++    # int_adder (unpipelined: fetch only when the adder is free)
++    index = check_valid_ins_in_rs(rs_int_adder, ROB, cycle)
++    if (index>=0)&(len(fu_int_adder)==0):
+         fu_int_adder.append(fu_entry())
+         add_entry_into_fu(fu_int_adder, rs_int_adder[index])
+-        # check if it's a waiting instruction
+-        if ROB[find_ROB_entry(ROB, rs_int_adder[index].dest_tag)].issue[0] < cycle:
+-            fu_exe(fu_int_adder, results_buffer, ROB, time_fu_int_adder, cycle, PC)
++        fu_exe(fu_int_adder, results_buffer, ROB, time_fu_int_adder, cycle, PC, True)
+         # remove ins from rs 
+         rs_int_adder[index].busy = 0
+-    # fp_adder
+-    if check_valid_ins_in_rs(rs_fp_adder)>=0:
+-        index = check_valid_ins_in_rs(rs_fp_adder)
++    # fp_adder (pipelined)
++    index = check_valid_ins_in_rs(rs_fp_adder, ROB, cycle)
++    if index>=0:
+         fu_fp_adder.append(fu_entry())
+         add_entry_into_fu(fu_fp_adder, rs_fp_adder[index])
+-        if ROB[find_ROB_entry(ROB, rs_fp_adder[index].dest_tag)].issue[0] < cycle:
+-            fu_exe(fu_fp_adder, results_buffer, ROB, time_fu_fp_adder, cycle, PC)
++        fu_exe(fu_fp_adder, results_buffer, ROB, time_fu_fp_adder, cycle, PC, True)
+         # remove ins from rs 
+         rs_fp_adder[index].busy = 0
+-    # fp_multi
+-    if check_valid_ins_in_rs(rs_fp_multi)>=0:
+-        index = check_valid_ins_in_rs(rs_fp_multi)
++    # fp_multi (pipelined)
++    index = check_valid_ins_in_rs(rs_fp_multi, ROB, cycle)
++    if index>=0:
+         fu_fp_multi.append(fu_entry())
+         add_entry_into_fu(fu_fp_multi, rs_fp_multi[index])
+-        if ROB[find_ROB_entry(ROB, rs_fp_multi[index].dest_tag)].issue[0] < cycle:
+-            fu_exe(fu_fp_multi, results_buffer, ROB, time_fu_fp_multi, cycle, PC)
++        fu_exe(fu_fp_multi, results_buffer, ROB, time_fu_fp_multi, cycle, PC, True)
+         # remove ins from rs 
+         rs_fp_multi[index].busy = 0
+-
+--- provided/code/mem.py
++++ code/mem.py
+@@ -61,14 +61,7 @@
+ 
+ # function: check if Sd to be committed in next cycle 
+ def check_if_sd_committable(ld_sd_queue, ROB):
+-    flag = False
+-    if ld_sd_queue[0].ldsd_tag == ROB[0].dest_tag:
+-        flag = True
+-    if ld_sd_queue[0].ldsd_tag == ROB[1].dest_tag:
+-        # previous ins has been broadcasted
+-        if len(ROB[0].cdb)!=0:
+-            flag = True
+-    return flag
++    return ld_sd_queue[0].dest_tag == ROB[0].ROB_tag
+ 
+ # function: mem 
+ def mem(ld_sd_queue, ld_sd_mem, time_ld_sd_mem, results_buffer, 
+@@ -80,7 +73,9 @@
+         index += 1
+         if (index>=1)&(element.op=='Ld')&(element.ready==1):
+             data = forward_check_from_sd(ld_sd_queue, index)
+-            if len(data)>0:
++            # forwarding happens in the MEM stage, i.e. after the EX cycle
++            rob_index = find_ROB_entry(ROB, element.dest_tag)
++            if (len(data)>0)&(ROB[rob_index].exe[-1]<cycle):
+                 # Ld gets data 
+                 results_buffer.append(fu_result())
+                 results_buffer[-1].value = data[0]
+@@ -88,8 +83,7 @@
+                 # remove the Ld instruction
+                 remove_list.append(element)
+                 # write mem cylce in ROB
+-                index = find_ROB_entry(ROB, element.dest_tag)
+-                ROB[index].mem.append(cycle)
++                ROB[rob_index].mem.append(cycle)
+     # remove lookforwared Ld
+     for element in remove_list:
+         ld_sd_queue.remove(element)
+@@ -127,8 +121,8 @@
+         if (ld_sd_queue[0].op=='Sd'):
+             # check if this Sd is ready and to be commited 
+             if (ld_sd_queue[0].ready==1):
+-                # check to be committed in next cycle
+-                if (check_if_sd_committable):
++                # stores write memory at commit: all older instructions have committed
++                if check_if_sd_committable(ld_sd_queue, ROB):
+                     # already have data in Sd
+                     if (type(ld_sd_queue[0].data)==int)|(type(ld_sd_queue[0].data)==float):
+                         # put the Sd entry into ld_sd_mem
+@@ -142,12 +136,10 @@
+             for index in range(len(ld_sd_queue)):
+                 # ready Ld
+                 if (ld_sd_queue[index].op=='Ld')&(ld_sd_queue[index].ready==1):
+-                    # haven't got data
+-                    if (type(ld_sd_queue[0].data)!=int)&(type(ld_sd_queue[0].data)!=float):
+-                        # all previous Sd instructions are ready but no address match 
+-                        if check_all_previous_Sd_no_match(ld_sd_queue, index): 
+-                            put_entry_into_ld_sd_mem(ld_sd_mem, ld_sd_queue[index])
+-                            ld_sd_queue.remove(ld_sd_queue[index])
+-                            ld_sd_mem.busy =1
+-                            break 
++                    # all previous Sd instructions are ready but no address match 
++                    if check_all_previous_Sd_no_match(ld_sd_queue, index): 
++                        put_entry_into_ld_sd_mem(ld_sd_mem, ld_sd_queue[index])
++                        ld_sd_queue.remove(ld_sd_queue[index])
++                        ld_sd_mem.busy =1
++                        break 
+ 
+--- provided/code/wb.py
++++ code/wb.py
+@@ -2,6 +2,7 @@
+ # 29th May 2017 
+ 
+ '''
++for up to issue_width results per cycle:
+ 1. broadcast data on cdb 
+ 2. fetch data from results queue 
+ 3. remove entry in results queue
+@@ -23,12 +24,15 @@
+     dest_tag = cdb.dest_tag
+     index = find_ROB_entry(ROB, dest_tag)
+     reg_tag = ROB[index].dest_tag
++    # the RAT entry is only updated if no later instruction renamed the register
+     # rat_int
+     if reg_tag[0] == 'R':
+-        rat_int[int(reg_tag[1:])] = cdb.value
++        if rat_int[int(reg_tag[1:])] == dest_tag:
++            rat_int[int(reg_tag[1:])] = cdb.value
+     # rat_fp
+     if reg_tag[0] == 'F':
+-        rat_fp[int(reg_tag[1:])] = cdb.value 
++        if rat_fp[int(reg_tag[1:])] == dest_tag:
++            rat_fp[int(reg_tag[1:])] = cdb.value 
+     # rs list
+     rs_list = [rs_int_adder, rs_fp_adder, rs_fp_multi]
+     for rs in rs_list:
+@@ -53,21 +57,23 @@
+             element.cdb.append(cycle)
+ 
+ # function: wb 
++# cdb is a list with issue_width entries: up to issue_width results are broadcasted per cycle
+ def wb(cdb, rat_int, rat_fp, 
+         rs_int_adder, rs_fp_adder, rs_fp_multi,
+         ld_sd_queue, ROB, cycle,
+         results_buffer):
+-    # broadcast 
+-    if cdb.valid == 1:
+-        boroadcast(cdb, rat_int, rat_fp, 
+-                    rs_int_adder, rs_fp_adder, rs_fp_multi,
+-                    ld_sd_queue, ROB, cycle)
+-        cdb.valid = 0
+-    # fetch data from results queue
+-    if cdb.valid == 0:
+-        if len(results_buffer)>0:
+-            cdb.valid = 1
+-            cdb.value = results_buffer[0].value
+-            cdb.dest_tag = results_buffer[0].dest_tag
+-            results_buffer.popleft()
++    for entry in cdb:
++        # broadcast 
++        if entry.valid == 1:
++            boroadcast(entry, rat_int, rat_fp, 
++                        rs_int_adder, rs_fp_adder, rs_fp_multi,
++                        ld_sd_queue, ROB, cycle)
++            entry.valid = 0
++        # fetch data from results queue
++        if entry.valid == 0:
++            if len(results_buffer)>0:
++                entry.valid = 1
++                entry.value = results_buffer[0].value
++                entry.dest_tag = results_buffer[0].dest_tag
++                results_buffer.popleft()
+ 
+--- provided/code/commit.py
++++ code/commit.py
+@@ -18,32 +18,35 @@
+ def modify_arch_reg(entry, reg_int, reg_fp):
+     if entry.dest_tag[0] == 'F':
+         reg_fp[int(entry.dest_tag[1:])] = entry.value
++    elif entry.dest_tag == 'R0': # R0 is hardwired to 0
++        pass
+     elif entry.dest_tag[0] == 'R':
+         reg_int[int(entry.dest_tag[1:])] = entry.value
+     else:
+         pass
+ 
+ # function: commit
+-def commit(ROB, reg_int, reg_fp, cycle, instructions):
+-    if len(ROB)>0:
+-        if instructions[ROB[0].PC].split(' ')[0]=='Bne':
+-            if len(ROB[0].exe)!=0:
+-                entry = ROB.popleft()
+-                print_ROB(entry, instructions)
+-        if (len(ROB)>0)&(instructions[ROB[0].PC].split(' ')[0]!='Bne'):
+-            if len(ROB[0].cdb)!=0: # broadcasted instructions
+-                ROB[0].commit.append(cycle+1)
+-                entry = ROB.popleft()
+-                modify_arch_reg(entry, reg_int, reg_fp)
+-                print_ROB(entry, instructions)
+-            elif len(ROB[0].commit)!=0: # Sd
+-                entry = ROB.popleft()
+-                print_ROB(entry, instructions)
+-                if len(ROB)>0:
+-                    if len(ROB[0].cdb)!=0: # broadcasted instructions
+-                        ROB[0].commit.append(cycle+1)
+-                        entry = ROB.popleft()
+-                        modify_arch_reg(entry, reg_int, reg_fp)
+-                        print_ROB(entry, instructions)
+-            else:
+-                pass
++# up to issue_width instructions leave the ROB per cycle, in program order
++def commit(ROB, reg_int, reg_fp, cycle, instructions, issue_width):
++    count = 0
++    while (len(ROB)>0)&(count<issue_width):
++        op = instructions[ROB[0].PC].split(' ')[0]
++        if (op=='Bne')|(op=='Beq'):
++            if len(ROB[0].exe)<2: # not resolved yet
++                break
++            ROB[0].commit.append(cycle+1)
++        elif op=='Sd':
++            # commit cycle is written by the MEM stage when the store starts writing memory
++            if len(ROB[0].commit)==0:
++                break
++            entry = ROB.popleft()
++            print_ROB(entry, instructions)
++            continue
++        else:
++            if len(ROB[0].cdb)==0: # not broadcasted yet
++                break
++            ROB[0].commit.append(cycle+1)
++            modify_arch_reg(ROB[0], reg_int, reg_fp)
++        entry = ROB.popleft()
++        print_ROB(entry, instructions)
++        count += 1

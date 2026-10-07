@@ -10,14 +10,14 @@ Tomasulo Algorithm Simulation
 How to run (Python 3):
 
     cd code
-    python main.py                           # runs test_case.txt, issue width from the file (default 1)
-    python main.py ../tests/test2_independent.txt
-    python main.py ../tests/test2_independent.txt 4    # issue width given on the command line
+    python3 main.py                           # runs test_case.txt, issue width from the file (default 1)
+    python3 main.py ../tests/test2_independent.txt
+    python3 main.py ../tests/test2_independent.txt 4    # issue width given on the command line
 
 How to test:
 
     cd code
-    python run_tests.py
+    python3 run_tests.py
 
 run_tests.py runs every file in tests/ with issue width 1, 2, 3 and 4. For each run it
 compares the final registers and memory with a sequential reference model, and checks
@@ -57,4 +57,5 @@ Files
 * code/ -- simulator (main.py, init.py, issue.py, exe.py, mem.py, wb.py, commit.py) and run_tests.py
 * tests/ -- test cases
 * results/ -- output of every test case for issue width 1 to 4, and summary.txt
-* REPORT.md -- report
+* changes.diff -- every change against the provided code (unified diff)
+* the report is the PDF submitted with this code
